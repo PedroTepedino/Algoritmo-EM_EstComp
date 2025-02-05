@@ -1,0 +1,501 @@
+---
+output: html_document
+runtime: shiny
+---
+# Seminário de Est. Computacional - Algoritmo EM
+
+## **Recapitulando o algoritmo**
+O algoritmo EM busca encontrar a estimativa de máxima verossimilhança da verossimilhança marginal aplicando iterativamente estas duas etapas:
+
+**Etapa de Expectativa (E step):**  
+Define-se \( Q({\boldsymbol{\theta}} \mid {\boldsymbol{\theta}}^{(t)}) \) como o valor esperado da função de log-verossimilhança de \( {\boldsymbol{\theta}} \), em relação à distribuição condicional atual de \( \mathbf{Z} \) dado \( \mathbf{X} \) e às estimativas atuais dos parâmetros \( {\boldsymbol{\theta}}^{(t)} \):  
+\[
+Q({\boldsymbol{\theta}} \mid {\boldsymbol{\theta}}^{(t)}) = \operatorname{E}_{\mathbf{Z} \sim p(\cdot | \mathbf{X}, {\boldsymbol{\theta}}^{(t)})} \left[ \log p(\mathbf{X}, \mathbf{Z} | {\boldsymbol{\theta}}) \right]
+\]
+
+**Etapa de Maximização (M step):**  
+Encontram-se os parâmetros que maximizam essa quantidade:  
+\[
+{\boldsymbol{\theta}}^{(t+1)} = \underset{{\boldsymbol{\theta}}}{\operatorname{arg\,max}} \, Q({\boldsymbol{\theta}} \mid {\boldsymbol{\theta}}^{(t)})
+\]
+
+De forma mais sucinta, podemos escrevê-lo como uma única equação:  
+\[
+{\boldsymbol{\theta}}^{(t+1)} = \underset{{\boldsymbol{\theta}}}{\operatorname{arg\,max}} \, \operatorname{E}_{\mathbf{Z} \sim p(\cdot | \mathbf{X}, {\boldsymbol{\theta}}^{(t)})} \left[ \log p(\mathbf{X}, \mathbf{Z} | {\boldsymbol{\theta}}) \right]
+\]
+
+## Ajuste de modelo de regressão
+
+```{r}
+EM_regression <- function(y, x, b0_E, b1_E, tolerance = 0.01, freq_na = 0.01) {
+  
+  n = length(x)
+  coef_lm <- coef(lm(y~x))
+  x_E <- x  # Criando cópia para evitar modificar x original
+  
+  if (freq_na != 0){
+    set.seed(42)
+    x_E[sample(1:n, round(freq_na*n))] <- NA  # Inserindo NAs aleatórios
+  }
+  
+  na_obs <- which(is.na(x_E))
+  iter <- 0
+  convergiu <- FALSE
+  caminho <- data.frame(b0 = numeric(), b1 = numeric())
+  
+  while (!convergiu) {
+    iter <- iter + 1
+    caminho <- rbind(caminho, data.frame(b0 = b0_E, b1 = b1_E))
+    
+    # Passo E: Imputação dos valores ausentes de x
+    if (freq_na != 0){
+      x_E[na_obs] <- (y[na_obs] - b0_E) / b1_E
+    }
+    
+    # Passo M: Ajuste do modelo
+    modelo_E <- lm(y ~ x_E)
+    novos_par <- coef(modelo_E)
+    
+    # Critério de parada
+    convergiu <- max(abs(novos_par - c(b0_E, b1_E))) < tolerance | freq_na == 0
+    
+    # Atualização dos coeficientes
+    b0_E <- novos_par[1]
+    b1_E <- novos_par[2]
+  
+  }
+  
+  return(list(coef_EM = c(b0_E, b1_E), coef_LM = coef_lm,iteracoes = iter, caminho = caminho))
+}
+```
+
+
+```{r}
+n <- 100
+x <- rnorm(n)
+y <- 2 + 3 * x + rnorm(n)
+```
+
+
+```{r}
+EM_regression(y, x, b0_E = -4, b1_E = -6, freq_na = 0.60)
+```
+
+```{r}
+library(shiny)
+library(ggplot2)
+library(MASS)
+
+ui <- fluidPage(
+  titlePanel("Algoritmo EM para Regressão"),
+  sidebarLayout(
+    sidebarPanel(
+      sliderInput("b0", "b0 inicial:", min = -5, max = 5, value = 0),
+      sliderInput("b1", "b1 inicial:", min = -5, max = 5, value = 1),
+      sliderInput("tolerance", "Tolerância:", min = 0.001, max = 0.5, value = 0.1),
+      sliderInput("freq_na", "Freq. NA:", min = 0, max = 1, value = 0.01),
+      helpText("Modelo: Yi = 2 + 3 Xi") 
+    ),
+    mainPanel(
+      plotOutput("contourPlot"),
+      verbatimTextOutput("output")
+    )
+  )
+)
+
+server <- function(input, output) {
+  n <- 100
+  x <- rnorm(n)
+  y <- 2 + 3 * x + rnorm(n)
+  
+  coef_reais <- coef(lm(y~x))
+  
+  resultado <- reactive({
+    EM_regression(y, x, b0_E = input$b0, b1_E = input$b1, tolerance = input$tolerance, freq_na = input$freq_na)
+  })
+  
+  output$output <- renderPrint({
+    resultado()
+  })
+  
+  output$contourPlot <- renderPlot({
+    caminho <- resultado()$caminho
+    
+    b0_seq <- seq(min(caminho$b0) - 1, coef_reais[1] + 1, length.out = 50)
+    b1_seq <- seq(min(caminho$b1) - 1, coef_reais[2] + 1, length.out = 50)
+    beta.grid <- expand.grid(b0 = b0_seq, b1 = b1_seq)
+    
+    # Cálculo do erro para cada par (b0, b1), garantindo remoção de NAs
+    erro <- apply(beta.grid, 1, function(p) {
+      p <- as.numeric(p)  # Garante que p é numérico
+      mean((y[!is.na(x)] - (p[1] + p[2] * x[!is.na(x)]))^2, na.rm = TRUE)
+    })
+    
+    data.grid <- cbind(beta.grid, erro)
+    
+    ggplot(data.grid, aes(x = b0, y = b1)) +
+      geom_contour_filled(aes(z = erro), show.legend = FALSE) +  # Remove a legenda das curvas de nível
+      geom_path(data = caminho, aes(x = b0, y = b1), color = "red", size = 1) +
+      geom_point(data = caminho, aes(x = b0, y = b1), color = "black") +
+      geom_point(
+        data = data.frame(b0 = 2, b1 = 3, label = "B1 e B0 reais"), 
+        aes(x = b0, y = b1, color = label), 
+        size = 3
+      ) +
+      geom_point(
+        data = data.frame(b0 = coef_reais[1], b1 = coef_reais[2], label = "B1 e B0 do LM"), 
+        aes(x = b0, y = b1, color = label), 
+        size = 3
+      ) +
+      scale_color_manual(values = c("B1 e B0 reais" = "yellow", "B1 e B0 do LM" = "blue")) +  # Cores para os pontos
+      labs(
+        title = "Curva de Nível do MSE e caminho do algoritmo EM", 
+        x = "b0", 
+        y = "b1", 
+        color = "Legenda"  # Título da legenda
+      )
+  })
+}
+```
+
+
+```{r}
+shinyApp(ui, server)
+```
+
+## EVM e HMM
+
+Ambos são extensões ou aplicações específicas do algoritmo EM, mas com propósitos e contextos diferentes. Vamos detalhar cada um deles:
+
+
+### 1. **EVM (Expectation-Variance-Maximization)**
+
+O **EVM** é uma variação do algoritmo EM que incorpora a estimação da **variância** (ou covariância) dos parâmetros durante o processo de maximização. Enquanto o EM tradicional foca na estimação de parâmetros que maximizam a verossimilhança, o EVM também leva em consideração a incerteza associada a esses parâmetros.
+
+#### **Contexto de Aplicação**
+O EVM é útil em situações onde a **incerteza dos parâmetros** é importante, como em modelos estatísticos complexos ou quando os dados são escassos e a estimação dos parâmetros pode ser instável.
+
+#### **Funcionamento**
+O EVM adiciona um passo extra ao algoritmo EM tradicional:
+1. **Passo E (Expectation)**:
+   - Calcula a expectativa da função de verossimilhança, como no EM tradicional.
+2. **Passo V (Variance)**:
+   - Calcula a variância (ou matriz de covariância) dos parâmetros estimados, levando em conta a incerteza.
+3. **Passo M (Maximization)**:
+   - Maximiza a função de verossimilhança, considerando tanto a expectativa quanto a variância dos parâmetros.
+
+#### **Exemplo Prático**
+Suponha que você esteja ajustando um modelo de mistura Gaussiana (GMM) com o EVM. Além de estimar as médias e proporções das distribuições, você também estimaria a **incerteza** associada a esses parâmetros. Isso pode ser útil, por exemplo, em aplicações de sensoriamento remoto, onde a precisão das estimativas é crítica.
+
+
+```{r}
+EVM_regression <- function(y, x, b0_E, b1_E, tolerance = 0.01, freq_na = 0.01, lambda = 0.1) {
+  # Inputs:
+  # y: Response variable (numeric vector)
+  # x: Predictor variable (numeric vector)
+  # b0_E: Initial guess for intercept
+  # b1_E: Initial guess for slope
+  # tolerance: Convergence threshold
+  # freq_na: Proportion of missing values in x
+  # lambda: Regularization parameter for variance term
+
+  n <- length(x)
+  coef_lm <- coef(lm(y ~ x))  # Standard linear regression coefficients
+  x_E <- x  # Copy of x to avoid modifying the original
+
+  # Introduce missing values if freq_na is not zero
+  if (freq_na != 0) {
+    set.seed(42)
+    x_E[sample(1:n, round(freq_na * n))] <- NA  # Randomly set values to NA
+  }
+
+  na_obs <- which(is.na(x_E))  # Indices of missing values
+  iter <- 0  # Iteration counter
+  convergiu <- FALSE  # Convergence flag
+  caminho <- data.frame(b0 = numeric(), b1 = numeric())  # Path of coefficients
+
+  while (!convergiu) {
+    iter <- iter + 1
+    caminho <- rbind(caminho, data.frame(b0 = b0_E, b1 = b1_E))
+
+    # E-step: Impute missing values in x_E
+    if (freq_na != 0) {
+      x_E[na_obs] <- (y[na_obs] - b0_E) / b1_E
+    }
+
+    # VM-step: Maximize expectancy and minimize variance
+    # Fit the model
+    modelo_E <- lm(y ~ x_E)
+    novos_par <- coef(modelo_E)
+
+    # Incorporate variance into the objective function
+    residuals <- y - (novos_par[1] + novos_par[2] * x_E)
+    variance_term <- lambda * var(residuals)  # Variance of residuals
+
+    # Adjust the coefficients to minimize variance
+    novos_par <- novos_par - variance_term * c(1, mean(x_E, na.rm = TRUE))
+
+    # Check convergence
+    convergiu <- max(abs(novos_par - c(b0_E, b1_E))) < tolerance | freq_na == 0
+
+    # Update coefficients
+    b0_E <- novos_par[1]
+    b1_E <- novos_par[2]
+  }
+
+  # Return results
+  return(list(
+    coef_EVM = c(b0_E, b1_E),  # Final EVM estimates
+    coef_LM = coef_lm,         # Standard LM estimates
+    iteracoes = iter,          # Number of iterations
+    caminho = caminho          # Path of coefficient estimates
+  ))
+}
+```
+
+```{r}
+EVM_regression(y, x, b0_E = -4, b1_E = -6, freq_na = 0.60)
+```
+
+
+```{r}
+library(shiny)
+library(ggplot2)
+library(MASS)
+
+ui_EVM <- fluidPage(
+  titlePanel("Algoritmo EM para Regressão"),
+  sidebarLayout(
+    sidebarPanel(
+      sliderInput("b0", "b0 inicial:", min = -5, max = 5, value = 0),
+      sliderInput("b1", "b1 inicial:", min = -5, max = 5, value = 1),
+      sliderInput("tolerance", "Tolerância:", min = 0.001, max = 0.5, value = 0.1),
+      sliderInput("freq_na", "Freq. NA:", min = 0, max = 1, value = 0.01),
+      helpText("Modelo: Yi = 2 + 3 Xi") 
+    ),
+    mainPanel(
+      plotOutput("contourPlot"),
+      verbatimTextOutput("output")
+    )
+  )
+)
+
+server_EVM <- function(input, output) {
+  n <- 100
+  x <- rnorm(n)
+  y <- 2 + 3 * x + rnorm(n)
+  
+  coef_reais <- coef(lm(y~x))
+  
+  resultado_EM <- reactive({
+    EM_regression(y, x, b0_E = input$b0, b1_E = input$b1, tolerance = input$tolerance, freq_na = input$freq_na)
+  })
+  
+    resultado_EVM <- reactive({
+    EVM_regression(y, x, b0_E = input$b0, b1_E = input$b1, tolerance = input$tolerance, freq_na = input$freq_na)
+  })
+  
+  output$output <- renderPrint({
+    resultado_EM()
+    resultado_EVM()
+  })
+  
+  
+  output$contourPlot <- renderPlot({
+    caminho_EM <- resultado_EM()$caminho
+    caminho_EVM <- resultado_EVM()$caminho
+    
+    b0_seq <- seq(min(caminho_EM$b0, caminho_EVM$b0, coef_reais[1]) - 1, max(caminho_EM$b0, caminho_EVM$b0, coef_reais[1]) + 1, length.out = 50)
+    b1_seq <- seq(min(caminho_EM$b1, caminho_EVM$b1, coef_reais[2]) - 1, max(caminho_EM$b1, caminho_EVM$b1, coef_reais[2]) + 1, length.out = 50)
+    beta.grid <- expand.grid(b0 = b0_seq, b1 = b1_seq)
+    
+    # Cálculo do erro para cada par (b0, b1), garantindo remoção de NAs
+    erro <- apply(beta.grid, 1, function(p) {
+      p <- as.numeric(p)  # Garante que p é numérico
+      mean((y[!is.na(x)] - (p[1] + p[2] * x[!is.na(x)]))^2, na.rm = TRUE)
+    })
+    
+    data.grid <- cbind(beta.grid, erro)
+    
+    ggplot(data.grid, aes(x = b0, y = b1)) +
+      geom_contour_filled(aes(z = erro), show.legend = FALSE) +  # Remove a legenda das curvas de nível
+      geom_path(data = caminho_EM, aes(x = b0, y = b1), color = "red", size = 1) +
+      geom_point(data = caminho_EM, aes(x = b0, y = b1), color = "black") +
+      geom_path(data = caminho_EVM, aes(x = b0, y = b1), color = "yellow", size = 1) +
+      geom_point(data = caminho_EVM, aes(x = b0, y = b1), color = "black") +
+      geom_point(
+        data = data.frame(b0 = 2, b1 = 3, label = "B1 e B0 reais"), 
+        aes(x = b0, y = b1, color = label), 
+        size = 3
+      ) +
+      geom_point(
+        data = data.frame(b0 = coef_reais[1], b1 = coef_reais[2], label = "B1 e B0 do LM"), 
+        aes(x = b0, y = b1, color = label), 
+        size = 3
+      ) +
+      scale_color_manual(values = c("B1 e B0 reais" = "yellow", "B1 e B0 do LM" = "blue")) +  # Cores para os pontos
+      labs(
+        title = "Curva de Nível do MSE e caminho do algoritmo EM", 
+        x = "b0", 
+        y = "b1", 
+        color = "Legenda"  # Título da legenda
+      )
+  })
+}
+```
+
+
+```{r}
+shinyApp(ui_EVM, server_EVM)
+```
+
+O EVM parece "andar" por mais espaços dos betas, provavelmente fazendo com que ele evite pontos de mínimos locais.
+
+
+```{r}
+EVM_regression <- function(y, x, b0_E, b1_E, tolerance = 0.1, freq_na = 0.01, lambda = 0.1) {
+  # Inputs:
+  # y: Response variable (numeric vector)
+  # x: Predictor variable (numeric vector)
+  # b0_E: Initial guess for intercept
+  # b1_E: Initial guess for slope
+  # tolerance: Convergence threshold
+  # freq_na: Proportion of missing values in x
+  # lambda: Regularization parameter for variance term
+
+  n <- length(x)
+  coef_lm <- coef(lm(y ~ x))  # Standard linear regression coefficients
+  x_E <- x  # Copy of x to avoid modifying the original
+
+  # Introduce missing values if freq_na is not zero
+  if (freq_na != 0) {
+    set.seed(42)
+    x_E[sample(1:n, round(freq_na * n))] <- NA  # Randomly set values to NA
+  }
+
+  na_obs <- which(is.na(x_E))  # Indices of missing values
+  iter <- 0  # Iteration counter
+  convergiu <- FALSE  # Convergence flag
+  caminho <- data.frame(b0 = numeric(), b1 = numeric())  # Path of coefficients
+
+  while (!convergiu) {
+    iter <- iter + 1
+    caminho <- rbind(caminho, data.frame(b0 = b0_E, b1 = b1_E))
+
+    # E-step: Impute missing values in x_E
+    if (freq_na != 0) {
+      x_E[na_obs] <- (y[na_obs] - b0_E) / b1_E
+    }
+
+    # Compute residuals
+    residuals <- y - (b0_E + b1_E * x_E)
+
+    # Compute the expected gradient (g_bar)
+    g_bar <- c(
+      -sum(residuals),               # Partial derivative w.r.t. b0
+      -sum(residuals * x_E)          # Partial derivative w.r.t. b1
+    ) / n
+
+    # Compute the expected Hessian (H_bar)
+    H_bar <- matrix(c(
+      n, sum(x_E),                   # First row of Hessian
+      sum(x_E), sum(x_E^2)           # Second row of Hessian
+    ), nrow = 2, byrow = TRUE) / n
+
+    # Compute the variance of the gradient (V_g)
+    V_g <- lambda * var(residuals) * diag(2)  # Diagonal matrix with variance term
+
+    # Update parameters using θ_{i+1} = θ_i - (H_bar + V_g)^{-1} g_bar
+    theta <- c(b0_E, b1_E)
+    theta_new <- theta - solve(H_bar + V_g) %*% g_bar
+
+    # Check convergence
+    convergiu <- max(abs(theta_new - theta)) < tolerance | freq_na == 0
+
+    # Update coefficients
+    b0_E <- theta_new[1]
+    b1_E <- theta_new[2]
+  }
+
+  # Return results
+  return(list(
+    coef_EVM = c(b0_E, b1_E),  # Final EVM estimates
+    coef_LM = coef_lm,         # Standard LM estimates
+    iteracoes = iter,          # Number of iterations
+    caminho = caminho          # Path of coefficient estimates
+  ))
+}
+```
+
+```{r}
+EVM_regression(y, x, b0_E = -4, b1_E = -6, freq_na = 0.60)
+```
+
+
+---
+
+### 2. **HMM (Hidden Markov Models)**
+
+Os **HMMs** são modelos estatísticos que utilizam o algoritmo EM para estimar parâmetros em sequências de dados onde os estados subjacentes são **não observáveis** (latentes). Eles são amplamente utilizados em reconhecimento de padrões, processamento de linguagem natural, bioinformática e muito mais.
+
+#### **Contexto de Aplicação**
+Os HMMs são usados quando os dados são sequenciais e existem estados ocultos que influenciam as observações. Por exemplo:
+- **Reconhecimento de Fala**: Os estados ocultos representam fonemas, e as observações são os sinais de áudio.
+- **Bioinformática**: Os estados ocultos podem representar regiões codificantes ou não codificantes em sequências de DNA.
+- **Finanças**: Os estados ocultos podem representar regimes de mercado (alta, baixa, estável).
+
+#### **Funcionamento**
+Um HMM é definido por:
+1. **Estados Ocultos**: Estados não observáveis que seguem uma cadeia de Markov.
+2. **Observações**: Dados observáveis que dependem dos estados ocultos.
+3. **Parâmetros**:
+   - Probabilidades de transição entre estados.
+   - Probabilidades de emissão (probabilidade de uma observação dado um estado).
+   - Distribuição inicial dos estados.
+
+O algoritmo EM (neste contexto, chamado de **algoritmo de Baum-Welch**) é usado para estimar os parâmetros do HMM:
+1. **Passo E (Expectation)**:
+   - Calcula as probabilidades dos estados ocultos dada a sequência de observações (usando o algoritmo de Forward-Backward).
+2. **Passo M (Maximization)**:
+   - Atualiza as probabilidades de transição e emissão para maximizar a verossimilhança esperada.
+
+#### **Exemplo Prático**
+Suponha que você tenha uma sequência de observações (por exemplo, palavras em um texto) e queira modelar os estados ocultos (por exemplo, partes do discurso, como substantivos, verbos, etc.). O HMM pode ser usado para aprender as probabilidades de transição entre partes do discurso e as probabilidades de emissão das palavras.
+
+#### Implementação em R:
+Você pode usar o pacote `HMM` ou `depmixS4` para ajustar um HMM em R. Aqui está um exemplo simples:
+
+```r
+library(HMM)
+
+# Definir os estados ocultos e observações
+estados <- c("Estado1", "Estado2")
+observacoes <- c("Obs1", "Obs2", "Obs3")
+
+# Inicializar o HMM
+hmm <- initHMM(estados, observacoes)
+
+# Sequência de observações
+seq_observacoes <- c("Obs1", "Obs2", "Obs3", "Obs1", "Obs2")
+
+# Ajustar o HMM usando o algoritmo de Baum-Welch (EM)
+hmm_ajustado <- baumWelch(hmm, seq_observacoes)
+
+# Resultados
+print(hmm_ajustado$hmm)
+```
+
+---
+
+### **Comparação entre EVM e HMM**
+| Característica          | EVM                                  | HMM                                  |
+|-------------------------|--------------------------------------|--------------------------------------|
+| **Objetivo**            | Incorporar incerteza nos parâmetros. | Modelar sequências com estados ocultos. |
+| **Aplicação Típica**    | Modelos estatísticos complexos.      | Reconhecimento de padrões, bioinformática, etc. |
+| **Passo Adicional**     | Cálculo da variância dos parâmetros. | Algoritmo de Forward-Backward para estados ocultos. |
+| **Uso do EM**           | Extensão do EM tradicional.          | Implementação específica (Baum-Welch). |
+
+---
+
+### **Conclusão**
+Tanto o **EVM** quanto os **HMMs** são derivações poderosas do algoritmo EM, cada uma com suas aplicações específicas. O EVM é mais focado em melhorar a estimação de parâmetros em modelos estatísticos, enquanto os HMMs são ideais para modelar sequências de dados com estados ocultos.
